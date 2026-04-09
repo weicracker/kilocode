@@ -1,12 +1,15 @@
 import React, { memo, useCallback, useEffect, useMemo, useState } from "react"
 import { convertHeadersToObject } from "./utils/headers"
-import { useDebounce } from "react-use"
+import { useDebounce, useEvent } from "react-use"
 import { VSCodeLink } from "@vscode/webview-ui-toolkit/react"
+import { Checkbox } from "vscrui" // kilocode_change
 // import { ExternalLinkIcon } from "@radix-ui/react-icons" // kilocode_change
 
 import {
 	type ProviderName,
 	type ProviderSettings,
+	type ModelInfo, // kilocode_change
+	type ExtensionMessage, // kilocode_change
 	DEFAULT_CONSECUTIVE_MISTAKE_LIMIT,
 	openRouterDefaultModelId,
 	zenmuxDefaultModelId, // kilocode_change
@@ -17,6 +20,7 @@ import {
 	openAiNativeDefaultModelId,
 	openAiCodexDefaultModelId,
 	anthropicDefaultModelId,
+	anthropicModels, // kilocode_change
 	doubaoDefaultModelId,
 	claudeCodeDefaultModelId,
 	qwenCodeDefaultModelId,
@@ -131,7 +135,7 @@ import {
 
 import { MODELS_BY_PROVIDER, PROVIDERS } from "./constants"
 import { inputEventTransform, noTransform } from "./transforms"
-// import { ModelPicker } from "./ModelPicker" // kilocode_change
+import { ModelPicker } from "./ModelPicker" // kilocode_change
 import { ModelInfoView } from "./ModelInfoView"
 import { ApiErrorMessage } from "./ApiErrorMessage"
 import { ThinkingBudget } from "./ThinkingBudget"
@@ -216,6 +220,7 @@ const ApiOptions = ({
 
 	const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false)
 	const [isAdvancedSettingsOpen, setIsAdvancedSettingsOpen] = useState(false)
+	const [discoveredAnthropicModels, setDiscoveredAnthropicModels] = useState<string[]>([]) // kilocode_change
 
 	const handleInputChange = useCallback(
 		<K extends keyof ProviderSettings, E>(
@@ -297,6 +302,15 @@ const ApiOptions = ({
 				vscode.postMessage({ type: "requestLmStudioModels" })
 			} else if (selectedProvider === "vscode-lm") {
 				vscode.postMessage({ type: "requestVsCodeLmModels" })
+			} else if (selectedProvider === "anthropic") {
+				vscode.postMessage({
+					type: "requestAnthropicModels",
+					values: {
+						baseUrl: apiConfiguration?.anthropicBaseUrl,
+						apiKey: apiConfiguration?.apiKey,
+						useAuthToken: apiConfiguration?.anthropicUseAuthToken ?? false,
+					},
+				})
 			} else if (
 				selectedProvider === "litellm" ||
 				selectedProvider === "deepinfra" ||
@@ -313,6 +327,9 @@ const ApiOptions = ({
 			apiConfiguration?.requestyApiKey,
 			apiConfiguration?.openAiBaseUrl,
 			apiConfiguration?.openAiApiKey,
+			apiConfiguration?.apiKey, // kilocode_change
+			apiConfiguration?.anthropicBaseUrl, // kilocode_change
+			apiConfiguration?.anthropicUseAuthToken, // kilocode_change
 			apiConfiguration?.ollamaBaseUrl,
 			apiConfiguration?.lmStudioBaseUrl,
 			apiConfiguration?.litellmBaseUrl,
@@ -324,6 +341,17 @@ const ApiOptions = ({
 			customHeaders,
 		],
 	)
+
+	// kilocode_change start
+	const onMessage = useCallback((event: MessageEvent) => {
+		const message: ExtensionMessage = event.data
+		if (message.type === "anthropicModels") {
+			setDiscoveredAnthropicModels(message.anthropicModels ?? [])
+		}
+	}, [])
+
+	useEvent("message", onMessage)
+	// kilocode_change end
 
 	useEffect(() => {
 		const apiValidationResult = validateApiConfigurationExcludingModelErrors(
@@ -371,6 +399,73 @@ const ApiOptions = ({
 
 		return availableModels
 	}, [selectedProvider, organizationAllowList, selectedModelId, apiConfiguration.moonshotBaseUrl])
+
+	// kilocode_change start
+	const anthropicModelPickerModels = useMemo(() => {
+		const models = MODELS_BY_PROVIDER.anthropic
+		if (!models) {
+			return {}
+		}
+
+		const filteredModels = filterModels(models, "anthropic", organizationAllowList)
+		const modelMap: Record<string, ModelInfo> = { ...(filteredModels || {}) }
+		const defaultModelInfo = models[anthropicDefaultModelId]
+		const customAnthropicModelInfo: ModelInfo = {
+			...defaultModelInfo,
+			supportsReasoningBudget: true,
+			supportsVerbosity: defaultModelInfo.supportsVerbosity || ["low", "medium", "high", "max"],
+			supportsAdaptiveThinking: apiConfiguration.anthropicCustomAdaptiveThinking === true,
+		}
+
+		for (const discoveredModelId of discoveredAnthropicModels) {
+			if (!modelMap[discoveredModelId]) {
+				modelMap[discoveredModelId] = customAnthropicModelInfo
+			}
+		}
+
+		if (selectedModelId && !modelMap[selectedModelId]) {
+			modelMap[selectedModelId] = customAnthropicModelInfo
+		}
+
+		return Object.fromEntries(
+			Object.entries(modelMap).filter(([modelId, modelInfo]) => {
+				if (modelId === selectedModelId) return true
+				return !modelInfo.deprecated
+			}),
+		)
+	}, [
+		organizationAllowList,
+		selectedModelId,
+		discoveredAnthropicModels,
+		apiConfiguration.anthropicCustomAdaptiveThinking,
+	])
+	// kilocode_change end
+
+	// kilocode_change start
+	const isCustomAnthropicModel = useMemo(
+		() => selectedProvider === "anthropic" && !!selectedModelId && !(selectedModelId in anthropicModels),
+		[selectedProvider, selectedModelId],
+	)
+	// kilocode_change end
+
+	// kilocode_change start
+	// Keep custom adaptive setting in sync with the master reasoning toggle.
+	// If reasoning is explicitly disabled, adaptive must be off as well.
+	useEffect(() => {
+		if (
+			isCustomAnthropicModel &&
+			apiConfiguration.enableReasoningEffort === false &&
+			apiConfiguration.anthropicCustomAdaptiveThinking
+		) {
+			setApiConfigurationField("anthropicCustomAdaptiveThinking", false, false)
+		}
+	}, [
+		isCustomAnthropicModel,
+		apiConfiguration.enableReasoningEffort,
+		apiConfiguration.anthropicCustomAdaptiveThinking,
+		setApiConfigurationField,
+	])
+	// kilocode_change end
 
 	const onProviderChange = useCallback(
 		(value: ProviderName) => {
@@ -1026,41 +1121,62 @@ const ApiOptions = ({
 				selectedProvider !== "openai-codex" && (
 					<>
 						<div>
-							<label className="block font-medium mb-1">{t("settings:providers.model")}</label>
-							<Select
-								value={selectedModelId === "custom-arn" ? "custom-arn" : selectedModelId}
-								onValueChange={(value) => {
-									setApiConfigurationField("apiModelId", value)
+							{/* kilocode_change start */}
+							{selectedProvider === "anthropic" ? (
+								<ModelPicker
+									apiConfiguration={apiConfiguration}
+									setApiConfigurationField={setApiConfigurationField}
+									defaultModelId={anthropicDefaultModelId}
+									models={anthropicModelPickerModels}
+									modelIdKey="apiModelId"
+									serviceName="Anthropic"
+									serviceUrl="https://docs.anthropic.com/en/docs/about-claude/models"
+									organizationAllowList={organizationAllowList}
+									errorMessage={modelValidationError}
+									simplifySettings={fromWelcomeView}
+								/>
+							) : (
+								<>
+									<label className="block font-medium mb-1">{t("settings:providers.model")}</label>
+									<Select
+										value={selectedModelId === "custom-arn" ? "custom-arn" : selectedModelId}
+										onValueChange={(value) => {
+											setApiConfigurationField("apiModelId", value)
 
-									// Clear custom ARN if not using custom ARN option.
-									if (value !== "custom-arn" && selectedProvider === "bedrock") {
-										setApiConfigurationField("awsCustomArn", "")
-									}
+											// Clear custom ARN if not using custom ARN option.
+											if (value !== "custom-arn" && selectedProvider === "bedrock") {
+												setApiConfigurationField("awsCustomArn", "")
+											}
 
-									// Clear reasoning effort when switching models to allow the new model's default to take effect
-									// This is especially important for GPT-5 models which default to "medium"
-									if (selectedProvider === "openai-native") {
-										setApiConfigurationField("reasoningEffort", undefined)
-									}
-								}}>
-								<SelectTrigger className="w-full">
-									<SelectValue placeholder={t("settings:common.select")} />
-								</SelectTrigger>
-								<SelectContent>
-									{selectedProviderModels.map((option) => (
-										<SelectItem key={option.value} value={option.value}>
-											{option.label}
-										</SelectItem>
-									))}
-									{selectedProvider === "bedrock" && (
-										<SelectItem value="custom-arn">{t("settings:labels.useCustomArn")}</SelectItem>
-									)}
-								</SelectContent>
-							</Select>
+											// Clear reasoning effort when switching models to allow the new model's default to take effect
+											// This is especially important for GPT-5 models which default to "medium"
+											if (selectedProvider === "openai-native") {
+												setApiConfigurationField("reasoningEffort", undefined)
+											}
+										}}>
+										<SelectTrigger className="w-full">
+											<SelectValue placeholder={t("settings:common.select")} />
+										</SelectTrigger>
+										<SelectContent>
+											{selectedProviderModels.map((option) => (
+												<SelectItem key={option.value} value={option.value}>
+													{option.label}
+												</SelectItem>
+											))}
+											{selectedProvider === "bedrock" && (
+												<SelectItem value="custom-arn">
+													{t("settings:labels.useCustomArn")}
+												</SelectItem>
+											)}
+										</SelectContent>
+									</Select>
+								</>
+							)}
+							{/* kilocode_change end */}
 						</div>
 
 						{/* Show error if a deprecated model is selected */}
-						{selectedModelInfo?.deprecated && (
+						{selectedProvider !== "anthropic" && selectedModelInfo?.deprecated && (
 							<ApiErrorMessage errorMessage={t("settings:validation.modelDeprecated")} />
 						)}
 
@@ -1072,7 +1188,7 @@ const ApiOptions = ({
 						)}
 
 						{/* Only show model info if not deprecated */}
-						{!selectedModelInfo?.deprecated && (
+						{selectedProvider !== "anthropic" && !selectedModelInfo?.deprecated && (
 							<ModelInfoView
 								apiProvider={selectedProvider}
 								selectedModelId={selectedModelId}
@@ -1083,6 +1199,31 @@ const ApiOptions = ({
 						)}
 					</>
 				)}
+
+			{!fromWelcomeView && (
+				// kilocode_change start
+				<>
+					{isCustomAnthropicModel && (
+						<div className="flex flex-col gap-1">
+							<Checkbox
+								checked={apiConfiguration.anthropicCustomAdaptiveThinking ?? false}
+								onChange={(checked: boolean) => {
+									setApiConfigurationField("anthropicCustomAdaptiveThinking", checked === true)
+									if (checked) {
+										setApiConfigurationField("enableReasoningEffort", true, false)
+									}
+								}}
+								data-testid="custom-anthropic-adaptive-thinking-checkbox">
+								{t("settings:providers.customAnthropicAdaptiveThinking")}
+							</Checkbox>
+							<div className="text-xs text-vscode-descriptionForeground">
+								{t("settings:providers.customAnthropicAdaptiveThinkingDescription")}
+							</div>
+						</div>
+					)}
+				</>
+				// kilocode_change end
+			)}
 
 			{!fromWelcomeView && (
 				<ThinkingBudget
@@ -1207,39 +1348,39 @@ const ApiOptions = ({
 								</div>
 							)
 							kilocode_change end */}
-								{showToolProtocolSelector && (
-									<div>
-										<label className="block font-medium mb-1">{t("settings:toolProtocol.label")}</label>
-										<Select
-											value={apiConfiguration.toolProtocol || "default"}
-											onValueChange={(value) => {
-												const newValue = value === "default" ? undefined : (value as ToolProtocol)
-												setApiConfigurationField("toolProtocol", newValue)
-											}}>
-											<SelectTrigger className="w-full">
-												<SelectValue placeholder={t("settings:common.select")} />
-											</SelectTrigger>
-											<SelectContent>
-												<SelectItem value="default">
-													{t("settings:toolProtocol.default")} (
-													{defaultProtocol === TOOL_PROTOCOL.NATIVE
-														? t("settings:toolProtocol.native")
-														: t("settings:toolProtocol.xml")}
-													)
-												</SelectItem>
-												<SelectItem value={TOOL_PROTOCOL.XML}>
-													{t("settings:toolProtocol.xml")}
-												</SelectItem>
-												<SelectItem value={TOOL_PROTOCOL.NATIVE}>
-													{t("settings:toolProtocol.native")}
-												</SelectItem>
-											</SelectContent>
-										</Select>
-										<div className="text-sm text-vscode-descriptionForeground mt-1">
-											{t("settings:toolProtocol.description")}
-										</div>
-									</div>
-								)}
+						{showToolProtocolSelector && (
+							<div>
+								<label className="block font-medium mb-1">{t("settings:toolProtocol.label")}</label>
+								<Select
+									value={apiConfiguration.toolProtocol || "default"}
+									onValueChange={(value) => {
+										const newValue = value === "default" ? undefined : (value as ToolProtocol)
+										setApiConfigurationField("toolProtocol", newValue)
+									}}>
+									<SelectTrigger className="w-full">
+										<SelectValue placeholder={t("settings:common.select")} />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="default">
+											{t("settings:toolProtocol.default")} (
+											{defaultProtocol === TOOL_PROTOCOL.NATIVE
+												? t("settings:toolProtocol.native")
+												: t("settings:toolProtocol.xml")}
+											)
+										</SelectItem>
+										<SelectItem value={TOOL_PROTOCOL.XML}>
+											{t("settings:toolProtocol.xml")}
+										</SelectItem>
+										<SelectItem value={TOOL_PROTOCOL.NATIVE}>
+											{t("settings:toolProtocol.native")}
+										</SelectItem>
+									</SelectContent>
+								</Select>
+								<div className="text-sm text-vscode-descriptionForeground mt-1">
+									{t("settings:toolProtocol.description")}
+								</div>
+							</div>
+						)}
 					</CollapsibleContent>
 				</Collapsible>
 			)}

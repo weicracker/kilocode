@@ -1,6 +1,6 @@
 // npx vitest src/components/settings/__tests__/ApiOptions.spec.tsx
 
-import { render, screen, fireEvent } from "@/utils/test-utils"
+import { render, screen, fireEvent, waitFor } from "@/utils/test-utils"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 
 import {
@@ -15,15 +15,34 @@ import * as ExtensionStateContext from "@src/context/ExtensionStateContext"
 const { ExtensionStateContextProvider } = ExtensionStateContext
 
 import ApiOptions, { ApiOptionsProps } from "../ApiOptions"
+import { vscode } from "@src/utils/vscode" // kilocode_change
+
+// kilocode_change start
+vi.mock("@src/utils/vscode", () => ({
+	vscode: {
+		postMessage: vi.fn(),
+	},
+}))
+// kilocode_change end
 
 // Mock VSCode components
 vi.mock("@vscode/webview-ui-toolkit/react", () => ({
-	VSCodeTextField: ({ children, value, onBlur }: any) => (
+	// kilocode_change start
+	VSCodeTextField: ({ children, value, onBlur, onInput, ...props }: any) => (
 		<div>
 			{children}
-			<input type="text" value={value} onChange={onBlur} />
+			<input
+				type="text"
+				value={value}
+				onChange={(event) => {
+					onInput?.(event)
+					onBlur?.(event)
+				}}
+				{...props}
+			/>
 		</div>
 	),
+	// kilocode_change end
 	VSCodeLink: ({ children, href }: any) => <a href={href}>{children}</a>,
 	VSCodeRadio: ({ value, checked }: any) => <input type="radio" value={value} checked={checked} />,
 	VSCodeRadioGroup: ({ children }: any) => <div>{children}</div>,
@@ -50,13 +69,18 @@ vi.mock("@vscode/webview-ui-toolkit/react", () => ({
 
 // Mock other components
 vi.mock("vscrui", () => ({
-	Checkbox: ({ children, checked, onChange }: any) => (
-		<label data-testid={`checkbox-${children?.toString().replace(/\s+/g, "-").toLowerCase()}`}>
+	Checkbox: ({ children, checked, onChange, ...props }: any) => (
+		<label
+			data-testid={props["data-testid"] || `checkbox-${children?.toString().replace(/\s+/g, "-").toLowerCase()}`}>
 			<input
 				type="checkbox"
 				checked={checked}
 				onChange={(e) => onChange(e.target.checked)}
-				data-testid={`checkbox-input-${children?.toString().replace(/\s+/g, "-").toLowerCase()}`}
+				data-testid={
+					props["data-testid"]
+						? `${props["data-testid"]}-input`
+						: `checkbox-input-${children?.toString().replace(/\s+/g, "-").toLowerCase()}`
+				}
 			/>
 			{children}
 		</label>
@@ -91,16 +115,17 @@ vi.mock("@/components/ui", () => ({
 	Command: ({ children }: any) => <div className="command-mock">{children}</div>,
 	CommandEmpty: ({ children }: any) => <div className="command-empty-mock">{children}</div>,
 	CommandGroup: ({ children }: any) => <div className="command-group-mock">{children}</div>,
-	CommandInput: ({ value, onValueChange, placeholder, className, _ref }: any) => (
+	CommandInput: ({ value, onValueChange, placeholder, className, _ref, ...props }: any) => (
 		<input
 			value={value}
 			onChange={(e) => onValueChange && onValueChange(e.target.value)}
 			placeholder={placeholder}
 			className={className}
+			{...props}
 		/>
 	),
-	CommandItem: ({ children, value, onSelect }: any) => (
-		<div className="command-item-mock" onClick={() => onSelect && onSelect(value)}>
+	CommandItem: ({ children, value, onSelect, ...props }: any) => (
+		<div className="command-item-mock" onClick={() => onSelect && onSelect(value)} {...props}>
 			{children}
 		</div>
 	),
@@ -278,6 +303,7 @@ vi.mock("@src/components/ui/hooks/useSelectedModel", () => ({
 
 			return {
 				provider: apiConfiguration.apiProvider,
+				id: apiConfiguration.apiModelId,
 				info,
 			}
 		} else {
@@ -285,6 +311,7 @@ vi.mock("@src/components/ui/hooks/useSelectedModel", () => ({
 
 			return {
 				provider: apiConfiguration.apiProvider,
+				id: apiConfiguration.apiModelId,
 				info,
 			}
 		}
@@ -659,6 +686,98 @@ describe("ApiOptions", () => {
 
 			expect(mockSetApiConfigurationField).toHaveBeenCalledWith("anthropicDeploymentName", "")
 		})
+
+		it("allows setting a custom Anthropic-compatible model id from the model picker", () => {
+			const mockSetApiConfigurationField = vi.fn()
+			const initialConfig: ProviderSettings = {
+				apiProvider: "anthropic",
+				apiModelId: "claude-sonnet-4-5",
+			}
+
+			renderApiOptions({
+				apiConfiguration: initialConfig,
+				setApiConfigurationField: mockSetApiConfigurationField,
+			})
+
+			const modelInput = screen.getByTestId("model-input")
+			fireEvent.change(modelInput, { target: { value: "MinMax-M2" } })
+			fireEvent.click(screen.getByTestId("use-custom-model"))
+
+			expect(mockSetApiConfigurationField).toHaveBeenCalledWith("apiModelId", "MinMax-M2")
+		})
+
+		it("shows adaptive thinking checkbox for custom Anthropic model ids", () => {
+			renderApiOptions({
+				apiConfiguration: {
+					apiProvider: "anthropic",
+					apiModelId: "ac/op-46",
+				},
+				setApiConfigurationField: vi.fn(),
+			})
+
+			expect(screen.getByTestId("custom-anthropic-adaptive-thinking-checkbox")).toBeInTheDocument()
+		})
+
+		it("updates custom adaptive thinking flag for custom Anthropic model ids", () => {
+			const mockSetApiConfigurationField = vi.fn()
+			renderApiOptions({
+				apiConfiguration: {
+					apiProvider: "anthropic",
+					apiModelId: "ac/op-46",
+					anthropicCustomAdaptiveThinking: false,
+				},
+				setApiConfigurationField: mockSetApiConfigurationField,
+			})
+
+			const checkbox = screen.getByTestId("custom-anthropic-adaptive-thinking-checkbox-input")
+			fireEvent.click(checkbox)
+
+			expect(mockSetApiConfigurationField).toHaveBeenCalledWith("anthropicCustomAdaptiveThinking", true)
+			expect(mockSetApiConfigurationField).toHaveBeenCalledWith("enableReasoningEffort", true, false)
+		})
+
+		it("auto-disables custom adaptive thinking when reasoning is disabled", () => {
+			const mockSetApiConfigurationField = vi.fn()
+			renderApiOptions({
+				apiConfiguration: {
+					apiProvider: "anthropic",
+					apiModelId: "ac/op-46",
+					anthropicCustomAdaptiveThinking: true,
+					enableReasoningEffort: false,
+				},
+				setApiConfigurationField: mockSetApiConfigurationField,
+			})
+
+			expect(mockSetApiConfigurationField).toHaveBeenCalledWith("anthropicCustomAdaptiveThinking", false, false)
+		})
+
+		// kilocode_change start
+		it("requests discovered Anthropic models for custom endpoints", async () => {
+			vi.mocked(vscode.postMessage).mockClear()
+
+			renderApiOptions({
+				apiConfiguration: {
+					apiProvider: "anthropic",
+					apiKey: "test-key",
+					anthropicBaseUrl: "https://anthropic-compatible.example.com/v1",
+					anthropicUseAuthToken: true,
+					apiModelId: "claude-sonnet-4-5",
+				},
+				setApiConfigurationField: vi.fn(),
+			})
+
+			await waitFor(() => {
+				expect(vscode.postMessage).toHaveBeenCalledWith({
+					type: "requestAnthropicModels",
+					values: {
+						baseUrl: "https://anthropic-compatible.example.com/v1",
+						apiKey: "test-key",
+						useAuthToken: true,
+					},
+				})
+			})
+		})
+		// kilocode_change end
 	})
 	// kilocode_change end
 

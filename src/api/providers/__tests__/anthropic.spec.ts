@@ -1,7 +1,8 @@
 // npx vitest run src/api/providers/__tests__/anthropic.spec.ts
 
-import { AnthropicHandler } from "../anthropic"
+import { AnthropicHandler, getAnthropicModels, getAnthropicSdkBaseUrl } from "../anthropic"
 import { ApiHandlerOptions } from "../../../shared/api"
+import axios from "axios"
 
 // Mock TelemetryService
 vitest.mock("@roo-code/telemetry", () => ({
@@ -71,10 +72,19 @@ vitest.mock("@anthropic-ai/sdk", () => {
 	}
 })
 
+// kilocode_change start
+vitest.mock("axios", () => ({
+	default: {
+		get: vitest.fn(),
+	},
+}))
+// kilocode_change end
+
 // Import after mock
 import { Anthropic } from "@anthropic-ai/sdk"
 
 const mockAnthropicConstructor = vitest.mocked(Anthropic)
+const mockAxiosGet = vitest.mocked(axios.get) // kilocode_change
 
 describe("AnthropicHandler", () => {
 	let handler: AnthropicHandler
@@ -112,6 +122,18 @@ describe("AnthropicHandler", () => {
 			})
 			expect(handlerWithCustomUrl).toBeInstanceOf(AnthropicHandler)
 		})
+
+		// kilocode_change start
+		it("normalizes custom base URL ending in /v1 to avoid duplicate /v1 path segments", () => {
+			const handlerWithVersionedBaseUrl = new AnthropicHandler({
+				...mockOptions,
+				anthropicBaseUrl: "https://anthropic-compatible.example.com/v1",
+			})
+			expect(handlerWithVersionedBaseUrl).toBeInstanceOf(AnthropicHandler)
+			expect(mockAnthropicConstructor).toHaveBeenCalledTimes(1)
+			expect(mockAnthropicConstructor.mock.calls[0]![0]!.baseURL).toBe("https://anthropic-compatible.example.com")
+		})
+		// kilocode_change end
 
 		it("use apiKey for passing token if anthropicUseAuthToken is not set", () => {
 			const handlerWithCustomUrl = new AnthropicHandler({
@@ -213,6 +235,32 @@ describe("AnthropicHandler", () => {
 			const lastCall = mockCreate.mock.calls[mockCreate.mock.calls.length - 1]?.[0]
 			expect(lastCall?.model).toBe("custom-deployment-model")
 		})
+
+		it("passes through custom Anthropic-compatible model IDs for streaming calls", async () => {
+			const handlerWithCustomModel = new AnthropicHandler({
+				...mockOptions,
+				apiModelId: "MinMax-M2",
+			})
+
+			const stream = handlerWithCustomModel.createMessage(systemPrompt, [
+				{
+					role: "user",
+					content: [{ type: "text" as const, text: "Message" }],
+				},
+			])
+
+			// Consume the stream to trigger the API call
+			for await (const _chunk of stream) {
+				// no-op
+			}
+
+			expect(mockCreate).toHaveBeenCalled()
+			const lastCall = mockCreate.mock.calls[mockCreate.mock.calls.length - 1]?.[0]
+			const requestOptions = mockCreate.mock.calls[mockCreate.mock.calls.length - 1]?.[1]
+
+			expect(lastCall?.model).toBe("MinMax-M2")
+			expect(requestOptions?.headers?.["anthropic-beta"]).toContain("prompt-caching-2024-07-31")
+		})
 		// kilocode_change end
 
 		it("should include 1M context beta header for Claude Sonnet 4.6 when enabled", async () => {
@@ -237,6 +285,57 @@ describe("AnthropicHandler", () => {
 			expect(requestOptions?.headers?.["anthropic-beta"]).toContain("context-1m-2025-08-07")
 		})
 	})
+
+	// kilocode_change start
+	describe("getAnthropicSdkBaseUrl", () => {
+		it("strips trailing /v1 from custom base URLs", () => {
+			expect(getAnthropicSdkBaseUrl("https://anthropic-compatible.example.com/v1")).toBe(
+				"https://anthropic-compatible.example.com",
+			)
+			expect(getAnthropicSdkBaseUrl("https://anthropic-compatible.example.com")).toBe(
+				"https://anthropic-compatible.example.com",
+			)
+		})
+	})
+
+	describe("getAnthropicModels", () => {
+		beforeEach(() => {
+			mockAxiosGet.mockReset()
+		})
+
+		it("returns discovered model IDs from a custom Anthropics-compatible endpoint", async () => {
+			mockAxiosGet.mockResolvedValueOnce({
+				data: {
+					data: [{ id: "claude-sonnet-4-5-20250929" }, { id: "MinMax-M2" }],
+				},
+			})
+
+			const models = await getAnthropicModels("https://anthropic-compatible.example.com/v1", "test-key", false)
+
+			expect(models).toEqual(["claude-sonnet-4-5-20250929", "MinMax-M2"])
+			expect(mockAxiosGet).toHaveBeenCalledWith("https://anthropic-compatible.example.com/v1/models", {
+				headers: {
+					"anthropic-version": "2023-06-01",
+					"x-api-key": "test-key",
+				},
+			})
+		})
+
+		it("uses Authorization bearer token when useAuthToken is enabled", async () => {
+			mockAxiosGet.mockResolvedValueOnce({ data: { data: [{ id: "claude-opus-4-6" }] } })
+
+			const models = await getAnthropicModels("https://anthropic-compatible.example.com", "token-value", true)
+
+			expect(models).toEqual(["claude-opus-4-6"])
+			expect(mockAxiosGet).toHaveBeenCalledWith("https://anthropic-compatible.example.com/v1/models", {
+				headers: {
+					"anthropic-version": "2023-06-01",
+					Authorization: "Bearer token-value",
+				},
+			})
+		})
+	})
+	// kilocode_change end
 
 	describe("completePrompt", () => {
 		it("should complete prompt successfully", async () => {
@@ -379,17 +478,33 @@ describe("AnthropicHandler", () => {
 			expect(model.info.outputPrice).toBe(22.5)
 		})
 
-		it("should enable 1M context for Claude 4.6 Sonnet when beta flag is set", () => {
-			const handler = new AnthropicHandler({
-				apiKey: "test-api-key",
-				apiModelId: "claude-sonnet-4-6",
-				anthropicBeta1MContext: true,
+		// kilocode_change start
+		it("should preserve a custom model ID when it is not in the static Anthropic model list", () => {
+			const handlerWithCustomModel = new AnthropicHandler({
+				...mockOptions,
+				apiModelId: "MinMax-M2",
 			})
-			const model = handler.getModel()
-			expect(model.info.contextWindow).toBe(1000000)
-			expect(model.info.inputPrice).toBe(6.0)
-			expect(model.info.outputPrice).toBe(22.5)
+
+			const model = handlerWithCustomModel.getModel()
+
+			expect(model.id).toBe("MinMax-M2")
+			expect(model.info).toBeDefined()
 		})
+
+		it("enables adaptive thinking capability for custom model IDs when explicitly toggled", () => {
+			const handlerWithCustomModel = new AnthropicHandler({
+				...mockOptions,
+				apiModelId: "ac/op-46",
+				anthropicCustomAdaptiveThinking: true,
+			})
+
+			const model = handlerWithCustomModel.getModel()
+
+			expect(model.id).toBe("ac/op-46")
+			expect(model.info.supportsAdaptiveThinking).toBe(true)
+			expect(model.reasoning).toEqual({ type: "adaptive" })
+		})
+		// kilocode_change end
 	})
 
 	describe("reasoning block filtering", () => {
