@@ -1,5 +1,11 @@
 # kilo-code
 
+## 5.8.3
+
+### Patch Changes
+
+- [`b0fb502`](https://github.com/Kilo-Org/kilocode/commit/b0fb50251c15ebc941f56ae89482e152ceedd644) Thanks [@weicracker](https://github.com/weicracker)! - Added support for custom Anthropic-compatible model IDs and manual Anthropic model entry in provider settings.
+
 ## 5.8.2
 
 ### Patch Changes
